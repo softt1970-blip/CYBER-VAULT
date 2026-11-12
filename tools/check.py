@@ -24,6 +24,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -120,7 +121,7 @@ def check_static():
         return
     html = src[start:end]
     js = "\n".join(re.findall(r"<script>(.*?)</script>", html, re.S))
-    tmp = os.path.join(ROOT, "libs", "_check_ui.js")
+    tmp = os.path.join(tempfile.gettempdir(), "cybervault_check_ui_%d.js" % os.getpid())
     try:
         io.open(tmp, "w", encoding="utf-8").write(js)
         node = shutil.which("node")
@@ -308,17 +309,22 @@ def main():
     print("=" * 66)
     print("ПРОВЕРКА CYBER-VAULT — %s" % ROOT)
     print("=" * 66)
-    check_static()
-    if static_only:
-        print("\n(только статика — эндпоинты пропущены)")
-    else:
-        st, _ = http("/api/get_data", timeout=5)
-        if st != 200:
-            print("\n!! Приложение не отвечает на %s — запусти start.bat" % BASE)
-            fail("нет связи с приложением")
+    try:
+        check_static()
+        if static_only:
+            print("\n(только статика — эндпоинты пропущены)")
         else:
-            check_endpoints()
-            check_concurrency()
+            st, _ = http("/api/get_data", timeout=5)
+            if st != 200:
+                print("\n!! Приложение не отвечает на %s — запусти start.bat" % BASE)
+                fail("нет связи с приложением")
+            else:
+                check_endpoints()
+                check_concurrency()
+    except Exception as e:
+        import traceback
+        fail("проверка упала с исключением: %r" % (e,))
+        traceback.print_exc()
     print("\n" + "=" * 66)
     if failures:
         print("ПРОВАЛЕНО: %d" % len(failures))

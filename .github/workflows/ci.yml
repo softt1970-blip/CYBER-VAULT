@@ -44,7 +44,7 @@ jobs:
         shell: cmd
         run: |
           start.bat
-          for /L %%i in (1,1,30) do (
+          for /L %%i in (1,1,150) do (
             curl -s -o NUL http://127.0.0.1:17555/api/get_data && exit /b 0
             ping -n 2 127.0.0.1 >NUL
           )
