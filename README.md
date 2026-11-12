@@ -8,6 +8,7 @@ Dark Luxury / Cyber-HUD · Windows · портативный · без обла�
 [![License: MIT](https://img.shields.io/badge/License-MIT-355C69.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-355C69.svg)](https://www.python.org/)
 [![Windows](https://img.shields.io/badge/Windows-10%2B-0078D4.svg)](https://www.microsoft.com/windows)
+[![CI](https://github.com/softt1970-blip/CYBER-VAULT/actions/workflows/ci.yml/badge.svg)](https://github.com/softt1970-blip/CYBER-VAULT/actions/workflows/ci.yml)
 ![portable](https://img.shields.io/badge/storage-portable-amber.svg)
 
 </div>
