@@ -2136,12 +2136,12 @@ function renderPersonal() {
         </div>` : ''}
       </div>
       
-      <div class="pt-3 border-t border-white/5 mt-auto flex">
-        <button onclick="copyPersonalSecret('${k.id}')" class="flex-1 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-[0_0_15px_rgba(16,185,129,0.3)] text-xs mono text-center uppercase tracking-wider transition-all">
-          📋 Скопировать
+      <div class="pt-3 border-t border-white/5 mt-auto flex items-center gap-2">
+        <button onclick="copyPersonalSecret('${k.id}')" title="Скопировать значение в буфер обмена" class="shrink-0 w-12 py-2 px-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-[0_0_15px_rgba(16,185,129,0.3)] text-sm mono text-center transition-all">
+          📋
         </button>
-        <button onclick="showBalance('personal', '${k.id}')" title="Расход, лимит и остаток" class="px-3 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/70 text-xs text-amber-300 mono transition-all">
-          💰
+        <button onclick="showBalance('personal', '${k.id}')" title="Расход, лимит и остаток" class="flex-1 py-2 px-3 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/70 text-xs text-amber-300 mono uppercase tracking-wider transition-all">
+          💰 Баланс
         </button>
       </div>
     `;
