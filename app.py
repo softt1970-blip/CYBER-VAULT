@@ -610,10 +610,15 @@ def fetch_provider_balance(value, service="", env_name="", base_url=""):
             if remaining is None and isinstance(used, (int, float)) and isinstance(limit, (int, float)):
                 remaining = max(0.0, limit - used)
             total = ((data.get("usage") or {}).get("total") or {})
+            today = ((data.get("usage") or {}).get("today") or {})
             if used is None:
                 used = total.get("cost")
             if used is None and limit is None and remaining is None:
                 continue
+            tokens_total = total.get("total_tokens")
+            per_1m = None
+            if isinstance(used, (int, float)) and isinstance(tokens_total, (int, float)) and tokens_total:
+                per_1m = used / tokens_total * 1000000.0
             extra = []
             if data.get("mode"):
                 extra.append(str(data.get("mode")))
@@ -625,7 +630,13 @@ def fetch_provider_balance(value, service="", env_name="", base_url=""):
                 "spent": used, "limit": limit, "remaining": remaining,
                 "unit": data.get("unit") or quota.get("unit") or "USD",
                 "source": root,
-                "requests": total.get("requests"), "tokens": total.get("total_tokens"),
+                "requests": total.get("requests"), "tokens": tokens_total,
+                "tokens_in": total.get("input_tokens"),
+                "tokens_out": total.get("output_tokens"),
+                "tokens_cache": total.get("cache_read_tokens"),
+                "tokens_cache_write": total.get("cache_creation_tokens"),
+                "today_spent": today.get("cost"), "today_requests": today.get("requests"),
+                "cost_per_1m": per_1m,
                 "status": data.get("status"),
                 "extra": ", ".join(extra) if extra else "",
             }
@@ -1834,8 +1845,18 @@ function renderBalance(b) {
     ['Лимит', fmtMoney(b.limit)],
     ['Остаток', fmtMoney(b.remaining)],
   ];
+  if (b.today_spent !== null && b.today_spent !== undefined) rows.push(['За сегодня', fmtMoney(b.today_spent)]);
   if (b.requests !== null && b.requests !== undefined) rows.push(['Запросов', fmtNum(b.requests)]);
-  if (b.tokens !== null && b.tokens !== undefined) rows.push(['Токенов', fmtNum(b.tokens)]);
+  if (b.tokens_in !== null && b.tokens_in !== undefined) {
+    rows.push(['Токенов (вход)', fmtNum(b.tokens_in)]);
+    if (b.tokens_out !== null && b.tokens_out !== undefined) rows.push(['Токенов (выход)', fmtNum(b.tokens_out)]);
+    if (b.tokens_cache) rows.push(['Токенов (кэш)', fmtNum(b.tokens_cache)]);
+    if (b.tokens_cache_write) rows.push(['Токенов (кэш запись)', fmtNum(b.tokens_cache_write)]);
+    if (b.tokens !== null && b.tokens !== undefined) rows.push(['Токенов всего', fmtNum(b.tokens)]);
+  } else if (b.tokens !== null && b.tokens !== undefined) {
+    rows.push(['Токенов', fmtNum(b.tokens)]);
+  }
+  if (b.cost_per_1m !== null && b.cost_per_1m !== undefined) rows.push(['Цена за 1M токенов', fmtMoney(b.cost_per_1m)]);
   if (b.status) rows.push(['Статус', b.status]);
   if (b.source) rows.push(['Источник', b.source]);
   if (b.extra) rows.push(['Детали', b.extra]);
