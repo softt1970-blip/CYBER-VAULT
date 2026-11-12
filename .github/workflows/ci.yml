@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  static-check:
+    name: Static analysis
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install analysis tools
+        run: python -m pip install --upgrade pyflakes
+
+      - name: Compile app.py
+        run: python -m py_compile app.py
+
+      - name: pyflakes
+        run: python -m pyflakes app.py
+
+      - name: Project checks (static part)
+        run: python tools\check.py --static
+
+  runtime-check:
+    name: Runtime check (Windows, full app)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Start the app
+        shell: cmd
+        run: |
+          start.bat
+          for /L %%i in (1,1,30) do (
+            curl -s -o NUL http://127.0.0.1:17555/api/get_data && exit /b 0
+            ping -n 2 127.0.0.1 >NUL
+          )
+          exit /b 1
+
+      - name: Full check (endpoints + concurrency)
+        shell: cmd
+        run: python tools\check.py
+
+      - name: Stop the app
+        if: always()
+        shell: cmd
+        run: taskkill /F /IM pythonw.exe || exit /b 0

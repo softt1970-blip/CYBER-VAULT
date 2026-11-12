@@ -1,0 +1,90 @@
+{
+  "keys": [
+    {
+      "id": "k1",
+      "service": "OpenRouter",
+      "env_name": "OPENROUTER_API_KEY",
+      "value": "sk-or-v1-demo00000000000000000000000000000000000000000000000000000000000000",
+      "category": "ai",
+      "project": "My Agent",
+      "provider_url": "https://openrouter.ai/keys",
+      "base_url": "https://openrouter.ai/api/v1",
+      "notes": "Основной ключ для LLM роутинга"
+    },
+    {
+      "id": "k2",
+      "service": "OpenRouter",
+      "env_name": "OPENROUTER_API_KEY_2",
+      "value": "sk-or-v1-demo11111111111111111111111111111111111111111111111111111111111111",
+      "category": "ai",
+      "project": "My Agent",
+      "provider_url": "https://openrouter.ai/keys",
+      "base_url": "https://openrouter.ai/api/v1",
+      "notes": "Запасной ключ: ротация через запятую"
+    },
+    {
+      "id": "k3",
+      "service": "Google Gemini",
+      "env_name": "GEMINI_API_KEY",
+      "value": "AIzaDEMO_NOT_A_REAL_KEY_00000000",
+      "category": "ai",
+      "project": "My Agent",
+      "provider_url": "https://aistudio.google.com/app/apikey",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta",
+      "notes": ""
+    },
+    {
+      "id": "k4",
+      "service": "GitHub",
+      "env_name": "GITHUB_TOKEN",
+      "value": "ghp_demo_NOT_A_REAL_KEY",
+      "category": "cloud",
+      "project": "CI",
+      "provider_url": "https://github.com/settings/tokens",
+      "base_url": "",
+      "notes": ""
+    },
+    {
+      "id": "k5",
+      "service": "Telegram Bot",
+      "env_name": "TELEGRAM_BOT_TOKEN",
+      "value": "1234567890:AA_DEMO_NOT_REAL",
+      "category": "bots",
+      "project": "",
+      "provider_url": "https://t.me/BotFather",
+      "base_url": "https://api.telegram.org",
+      "notes": ""
+    }
+  ],
+  "apps": [
+    {
+      "id": "app_agent",
+      "name": "My Agent",
+      "icon": "🤖",
+      "path": "C:\\Apps\\my-agent",
+      "linked_keys": ["k1", "k2"]
+    },
+    {
+      "id": "app_ollama",
+      "name": "Ollama Portable",
+      "icon": "🦙",
+      "path": "C:\\Apps\\ollama-portable",
+      "linked_keys": []
+    },
+    {
+      "id": "app_n8n",
+      "name": "n8n",
+      "icon": "⚙️",
+      "path": "n8n start",
+      "linked_keys": ["k3"]
+    }
+  ],
+  "personal": [
+    {
+      "id": "pk1",
+      "provider": "SSH доступ",
+      "value": "ssh-rsa DEMOEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE",
+      "notes": "Строка 1: хост server.example.com\nСтрока 2: user=deploy\nСтрока 3: порт 22"
+    }
+  ]
+}
