@@ -472,6 +472,68 @@ def scan_env_folder(folder):
     return found
 
 
+LAUNCH_LOG = os.path.join(BASE_DIR, "launch.log")
+
+
+def _drain_stream(stream, sink):
+    try:
+        for line in stream:
+            sink.append(line)
+    except Exception:
+        pass
+
+
+def launch_and_capture(cmd_list, cwd, env, wait=2.5, hide_console=False):
+    """Запускает процесс и снимает его вывод.
+
+    Консоль лаунчера скрывается (CREATE_NO_WINDOW), вывод читается отдельным
+    потоком, чтобы буфер пайпа не переполнился и не заблокировал процесс.
+    Первые wait секунд вывод собирается в список, дальше он дописывается
+    в launch.log в фоне.
+    """
+    chunks = []
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if hide_console else 0
+    proc = subprocess.Popen(
+        cmd_list,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=flags,
+    )
+
+    def reader():
+        try:
+            for line in proc.stdout:
+                chunks.append(line)
+                if len(chunks) > 400:
+                    break
+        except Exception:
+            pass
+        finally:
+            try:
+                append_launch_log("".join(chunks))
+            except Exception:
+                pass
+
+    threading.Thread(target=reader, daemon=True).start()
+    time.sleep(wait)
+    return proc, "".join(chunks).strip()
+
+
+def append_launch_log(text):
+    if not text:
+        return
+    try:
+        with open(LAUNCH_LOG, "a", encoding="utf-8") as f:
+            f.write("--- %s ---\n%s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), text))
+    except Exception:
+        pass
+
 class Vault:
     def __init__(self):
         self.data = {"keys": [], "apps": [], "personal": []}
@@ -495,22 +557,22 @@ class Vault:
                     self.data["apps"] = [
                         {
                             "id": "app_vizor",
-                            "name": "My Agent",
-                            "path": "C:\\Apps\\my-agent",
+                            "name": "VIZOR Agent",
+                            "path": "H:\\VIZOR",
                             "icon": "🤖",
                             "linked_keys": []
                         },
                         {
                             "id": "app_scrininfo",
-                            "name": "OCR Service",
-                            "path": "C:\\Apps\\ocr-service",
+                            "name": "Scrininfo OCR",
+                            "path": "H:\\Scrininfo",
                             "icon": "📸",
                             "linked_keys": []
                         },
                         {
                             "id": "app_ollama",
                             "name": "Ollama Portable",
-                            "path": "C:\\Apps\\ollama-portable",
+                            "path": "H:\\ollama-portable",
                             "icon": "🦙",
                             "linked_keys": []
                         },
@@ -1026,7 +1088,7 @@ HTML_UI = r"""<!DOCTYPE html>
     <div class="flex gap-2 items-end mb-4">
       <div class="flex-1">
         <label class="block text-xs text-zinc-400 mb-1 mono">Папка проекта</label>
-        <input id="import-folder" placeholder="C:\Apps\my-project" onkeydown="if(event.key==='Enter'){event.preventDefault();scanEnvFiles();}"
+        <input id="import-folder" placeholder="H:\VIZOR" onkeydown="if(event.key==='Enter'){event.preventDefault();scanEnvFiles();}"
           class="w-full px-3.5 py-2 rounded-xl bg-zinc-900/80 border border-zinc-800 text-sm text-amber-300 mono focus:border-amber-400/60 focus:outline-none" />
       </div>
       <button onclick="scanEnvFiles()" class="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-xs text-zinc-200 mono">
@@ -1041,6 +1103,25 @@ HTML_UI = r"""<!DOCTYPE html>
       <button onclick="importSelectedKeys()" class="px-4 py-2 rounded-xl amber-cta text-xs text-white mono">
         ⬇ Импортировать выбранные
       </button>
+    </div>
+  </div>
+</div>
+
+<!-- Вывод лаунчера агента -->
+<div id="launch-output-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md">
+  <div class="hud-card w-full max-w-2xl rounded-2xl p-6 relative">
+    <span class="hud-corner-tl"></span><span class="hud-corner-tr"></span>
+    <span class="hud-corner-bl"></span><span class="hud-corner-br"></span>
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-base font-bold text-white uppercase tracking-wider mono">
+        🚀 <span class="text-cyan-400">Вывод лаунчера</span>
+      </h3>
+      <button onclick="closeModal('launch-output-modal')" class="text-zinc-500 hover:text-white text-lg">✕</button>
+    </div>
+    <pre id="launch-output" class="max-h-96 overflow-auto whitespace-pre-wrap text-[12px] mono text-cyan-200 bg-black/70 border border-zinc-800 rounded-xl p-4"></pre>
+    <div class="flex items-center justify-between mt-4">
+      <span class="text-[10px] mono text-zinc-500">Полный лог: launch.log рядом с программой</span>
+      <button onclick="closeModal('launch-output-modal')" class="px-4 py-2 rounded-xl bg-zinc-900 border border-zinc-700 text-xs text-zinc-300 mono">Закрыть</button>
     </div>
   </div>
 </div>
@@ -1145,7 +1226,7 @@ HTML_UI = r"""<!DOCTYPE html>
       </div>
       <div>
         <label class="block text-xs text-zinc-400 mb-1 mono">Путь запуска (папка, .exe или команда) *</label>
-        <input id="agent-form-path" required placeholder="C:\Apps\my-agent.exe  или  n8n start"
+        <input id="agent-form-path" required placeholder="H:\VIZOR  или  n8n start"
           class="w-full px-3.5 py-2 rounded-xl bg-zinc-900/80 border border-zinc-800 text-sm text-zinc-200 mono focus:border-cyan-400/60 focus:outline-none" />
         <p class="text-[10px] text-zinc-500 mt-1.5 leading-tight">Если указать папку, она откроется в проводнике. Если указать .exe или .bat, он запустится.</p>
       </div>
@@ -1798,12 +1879,12 @@ function renderAgents() {
       <div class="flex flex-1 flex-col min-h-0">
         <div class="flex items-start justify-between gap-3 mb-3">
           <div class="flex items-center gap-3">
-            <button onclick="launchApp('${app.path.replace(/'/g, "\\'")}', '${app.id}')" class="w-12 h-12 rounded-xl bg-cyan-950/50 hover:bg-cyan-900 border border-cyan-800/50 hover:border-cyan-400 flex items-center justify-center shadow-[0_0_15px_rgba(8,145,178,0.2)] hover:shadow-[0_0_20px_rgba(8,145,178,0.6)] shrink-0 transition-all cursor-pointer" title="Кликните чтобы запустить">
+            <button onclick="launchAppById('${app.id}')" class="w-12 h-12 rounded-xl bg-cyan-950/50 hover:bg-cyan-900 border border-cyan-800/50 hover:border-cyan-400 flex items-center justify-center shadow-[0_0_15px_rgba(8,145,178,0.2)] hover:shadow-[0_0_20px_rgba(8,145,178,0.6)] shrink-0 transition-all cursor-pointer" title="Кликните чтобы запустить">
               ${agentIconHtml(app)}
             </button>
             <div class="min-w-0">
               <h3 class="font-bold text-white text-base leading-tight truncate">${app.name}</h3>
-              <div class="text-[10px] text-cyan-400/80 mono mt-0.5 truncate max-w-[150px]" title="${app.path}">${app.path}</div>
+              <div class="text-[10px] text-cyan-400/80 mono mt-0.5 truncate max-w-[150px]" title="${String(app.path || '').replace(/"/g, '&quot;')}">${app.path}</div>
             </div>
           </div>
           ${statusIndicator}
@@ -1820,7 +1901,7 @@ function renderAgents() {
           <button onclick="editAgent('${app.id}')" class="px-2.5 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-white text-xs">✎</button>
           <button onclick="deleteAgent('${app.id}')" class="px-2.5 py-1.5 rounded-lg bg-zinc-900 hover:bg-red-950 text-zinc-400 hover:text-red-400 text-xs">✕</button>
         </div>
-        <button onclick="launchApp('${app.path.replace(/'/g, "\\'")}', '${app.id}')" class="flex-1 py-2 px-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold shadow-[0_0_15px_rgba(8,145,178,0.4)] text-xs mono text-center uppercase tracking-wider transition-all">
+        <button onclick="launchAppById('${app.id}')" class="flex-1 py-2 px-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold shadow-[0_0_15px_rgba(8,145,178,0.4)] text-xs mono text-center uppercase tracking-wider transition-all">
           ▶ Запустить
         </button>
       </div>
@@ -1961,10 +2042,34 @@ async function pingAllKeys() {
   } 
 }
 
+function launchAppById(id) {
+  const a = APPS.find(x => x.id === id);
+  if (!a) { showToast('❌ Агент не найден'); return; }
+  return launchApp(a.path, a.id);
+}
+
 async function launchApp(path, appId) {
   const res = await api('/api/launch_app', { path: path, app_id: appId || null });
-  if (res.ok) showToast('🚀 ' + (res.msg || 'Запущено'));
-  else showToast('❌ ' + (res.msg || 'Ошибка запуска'));
+  if (!res.ok) {
+    showToast('❌ ' + (res.msg || 'Ошибка запуска'));
+    return;
+  }
+  const out = (res.output || '').trim();
+  if (out) {
+    showLaunchOutput(out);
+  } else {
+    showToast('🚀 ' + (res.msg || 'Запущено'));
+  }
+}
+
+function showLaunchOutput(text) {
+  const box = document.getElementById('launch-output');
+  if (!box) {
+    showToast(text.slice(0, 160));
+    return;
+  }
+  box.textContent = text;
+  document.getElementById('launch-output-modal').classList.remove('hidden');
 }
 
 function openModal(editObj = null, mode = '') {
@@ -2376,6 +2481,7 @@ class VaultRequestHandler(BaseHTTPRequestHandler):
             resolved = resolve_provider_env(linked)
             env.update(resolved)
             extra = (" · переменных передано: %d" % len(resolved)) if resolved else ""
+            output = ""
             try:
                 if kind == "file":
                     lower = target.lower()
@@ -2384,23 +2490,31 @@ class VaultRequestHandler(BaseHTTPRequestHandler):
                     elif lower.endswith(".lnk"):
                         subprocess.Popen(["cmd", "/c", "start", "", target], cwd=os.path.dirname(target) or BASE_DIR, env=env)
                     elif lower.endswith((".bat", ".cmd")):
-                        subprocess.Popen(["cmd", "/c", target], cwd=os.path.dirname(target) or BASE_DIR, env=env)
+                        # консоль лаунчера скрываем, вывод показываем в интерфейсе
+                        proc, output = launch_and_capture(["cmd", "/c", target],
+                                                         os.path.dirname(target) or BASE_DIR,
+                                                         env, hide_console=True)
                     else:
-                        subprocess.Popen([target], cwd=os.path.dirname(target) or BASE_DIR, env=env)
-                    self._send_json({"ok": True, "msg": f"Запущено: {target}{extra}"})
+                        proc, output = launch_and_capture([target],
+                                                         os.path.dirname(target) or BASE_DIR, env)
+                    append_launch_log(output)
+                    msg = "Запущено: %s%s" % (target, extra)
+                    if output:
+                        msg = output
+                    self._send_json({"ok": True, "msg": msg, "output": output, "target": target})
                 elif kind == "dir":
                     os.startfile(target)
-                    self._send_json({"ok": True, "msg": f"Открыта папка: {target}"})
+                    self._send_json({"ok": True, "msg": "Открыта папка: %s" % target, "output": ""})
                 else:
                     parts = target.split()
                     exe = parts[0] if parts else target
                     if not os.path.isabs(exe) and not shutil.which(exe):
-                        self._send_json({"ok": False, "msg": f"Команда не найдена: {exe}"})
+                        self._send_json({"ok": False, "msg": "Команда не найдена: %s" % exe, "output": ""})
                         return
                     subprocess.Popen(target, shell=True, cwd=BASE_DIR, env=env)
-                    self._send_json({"ok": True, "msg": f"Запущено: {target}{extra}"})
+                    self._send_json({"ok": True, "msg": "Запущено: %s%s" % (target, extra), "output": ""})
             except Exception as e:
-                self._send_json({"ok": False, "msg": f"Ошибка запуска: {e}"})
+                self._send_json({"ok": False, "msg": "Ошибка запуска: %s" % e, "output": ""})
         elif self.path == "/api/agent_icon":
             kind, target = resolve_launch_target(body.get("path", ""))
             icon = None
