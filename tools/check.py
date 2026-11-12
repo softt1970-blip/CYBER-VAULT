@@ -30,6 +30,14 @@ import time
 import urllib.error
 import urllib.request
 
+# Консоль CI на Windows использует cp1252 — печать кириллицы без этого падает
+# с UnicodeEncodeError. Переключаем вывод на UTF-8 с заменой непечатных символов.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, "app.py")
 BASE = "http://127.0.0.1:17555"
@@ -306,10 +314,10 @@ def main():
     if "--cleanup" in sys.argv:
         cleanup_only()
         return 0
-    print("=" * 66)
-    print("ПРОВЕРКА CYBER-VAULT — %s" % ROOT)
-    print("=" * 66)
     try:
+        print("=" * 66)
+        print("ПРОВЕРКА CYBER-VAULT — %s" % ROOT)
+        print("=" * 66)
         check_static()
         if static_only:
             print("\n(только статика — эндпоинты пропущены)")
@@ -324,14 +332,20 @@ def main():
     except Exception as e:
         import traceback
         fail("проверка упала с исключением: %r" % (e,))
-        traceback.print_exc()
-    print("\n" + "=" * 66)
-    if failures:
-        print("ПРОВАЛЕНО: %d" % len(failures))
-        for f in failures:
-            print("  - " + f)
+        try:
+            traceback.print_exc()
+        except Exception:
+            pass
+    try:
+        print("\n" + "=" * 66)
+        if failures:
+            print("ПРОВАЛЕНО: %d" % len(failures))
+            for f in failures:
+                print("  - " + f)
+            return 1
+        print("ВСЁ ЧИСТО")
+    except Exception:
         return 1
-    print("ВСЁ ЧИСТО")
     return 0
 
 

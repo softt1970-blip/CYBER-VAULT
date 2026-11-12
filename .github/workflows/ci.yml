@@ -11,6 +11,9 @@ jobs:
   static-check:
     name: Static analysis
     runs-on: windows-latest
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v4
 
@@ -33,6 +36,9 @@ jobs:
   runtime-check:
     name: Runtime check (Windows, full app)
     runs-on: windows-latest
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v4
 
