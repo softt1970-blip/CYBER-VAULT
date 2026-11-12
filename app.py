@@ -534,6 +534,104 @@ def append_launch_log(text):
     except Exception:
         pass
 
+def _http_json(url, value, timeout=8):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": "Bearer %s" % value,
+            "User-Agent": "CyberVault/1.6",
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def _norm_base(url):
+    u = (url or "").strip().rstrip("/")
+    if u.endswith("/v1"):
+        u = u[:-3]
+    return u
+
+
+def fetch_provider_balance(value, service="", env_name="", base_url=""):
+    """Расход / лимит / остаток по ключу.
+
+    Возвращает словарь или None, если провайдер не отдаёт биллинг.
+    Умеет: OpenRouter (/api/v1/auth/key) и гейтвеи с эндпоинтом /v1/usage
+    (quota.used / quota.limit / quota.remaining, unit, токены, запросы).
+    """
+    value = (value or "").strip()
+    if not value:
+        return None
+    hay = ("%s %s %s" % (service, env_name, base_url)).lower()
+
+    # 1) OpenRouter: usage / limit / limit_remaining
+    if "openrouter" in hay or value.startswith("sk-or-v1-"):
+        try:
+            data = _http_json("https://openrouter.ai/api/v1/auth/key", value).get("data", {})
+        except Exception:
+            data = None
+        if data:
+            spent = data.get("usage")
+            limit = data.get("limit")
+            remaining = data.get("limit_remaining")
+            if remaining is None and isinstance(limit, (int, float)) and isinstance(spent, (int, float)):
+                remaining = max(0.0, limit - spent)
+            extra = []
+            if data.get("is_free_tier"):
+                extra.append("бесплатный тариф")
+            daily = data.get("usage_daily")
+            if daily:
+                extra.append("за сегодня: $%.4f" % daily)
+            return {
+                "spent": spent, "limit": limit, "remaining": remaining,
+                "unit": "USD", "source": "OpenRouter",
+                "requests": None, "tokens": None, "status": None,
+                "extra": ", ".join(extra) if extra else "",
+            }
+
+    # 2) Гейтвей с /v1/usage: quota.used / quota.limit / quota.remaining
+    root = _norm_base(base_url or "")
+    if not root and service and "://" in str(service):
+        root = _norm_base(service)
+    if root:
+        for path in ("/v1/usage", "/usage"):
+            try:
+                data = _http_json(root + path, value)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            quota = data.get("quota") or {}
+            used = quota.get("used")
+            limit = quota.get("limit")
+            remaining = quota.get("remaining")
+            if remaining is None and isinstance(used, (int, float)) and isinstance(limit, (int, float)):
+                remaining = max(0.0, limit - used)
+            total = ((data.get("usage") or {}).get("total") or {})
+            if used is None:
+                used = total.get("cost")
+            if used is None and limit is None and remaining is None:
+                continue
+            extra = []
+            if data.get("mode"):
+                extra.append(str(data.get("mode")))
+            daily = data.get("daily_usage") or []
+            if daily:
+                last = daily[-1]
+                extra.append("последний день %s: $%.4f" % (last.get("date", "?"), last.get("cost") or 0.0))
+            return {
+                "spent": used, "limit": limit, "remaining": remaining,
+                "unit": data.get("unit") or quota.get("unit") or "USD",
+                "source": root,
+                "requests": total.get("requests"), "tokens": total.get("total_tokens"),
+                "status": data.get("status"),
+                "extra": ", ".join(extra) if extra else "",
+            }
+    return None
+
+
 class Vault:
     def __init__(self):
         self.data = {"keys": [], "apps": [], "personal": []}
@@ -720,7 +818,9 @@ def check_key_health(key_obj: dict) -> dict:
                 usage = info.get("usage", 0)
                 limit = info.get("limit")
                 limit_str = f"${limit:.2f}" if limit else "Безлимит"
-                return {"ok": True, "msg": f"Рабочий | Потрачено: ${usage:.3f} / Лимит: {limit_str}"}
+                rem = info.get("limit_remaining")
+                rem_str = f" / Остаток: ${rem:.4f}" if isinstance(rem, (int, float)) else ""
+                return {"ok": True, "msg": f"Рабочий | Потрачено: ${usage:.3f} / Лимит: {limit_str}{rem_str}"}
 
         elif "telegram" in s:
             api_root = base_url.rstrip("/") if base_url else "https://api.telegram.org"
@@ -1122,6 +1222,24 @@ HTML_UI = r"""<!DOCTYPE html>
     <div class="flex items-center justify-between mt-4">
       <span class="text-[10px] mono text-zinc-500">Полный лог: launch.log рядом с программой</span>
       <button onclick="closeModal('launch-output-modal')" class="px-4 py-2 rounded-xl bg-zinc-900 border border-zinc-700 text-xs text-zinc-300 mono">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<!-- Модальное окно баланса -->
+<div id="balance-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md">
+  <div class="hud-card w-full max-w-md rounded-2xl p-6 relative">
+    <span class="hud-corner-tl"></span><span class="hud-corner-tr"></span>
+    <span class="hud-corner-bl"></span><span class="hud-corner-br"></span>
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-base font-bold text-white uppercase tracking-wider mono">
+        💰 <span class="text-amber-400">Баланс</span>
+      </h3>
+      <button onclick="closeModal('balance-modal')" class="text-zinc-500 hover:text-white text-lg">✕</button>
+    </div>
+    <div id="balance-body" class="rounded-xl border border-zinc-800 bg-black/40 px-4 py-2"></div>
+    <div class="flex justify-end mt-4">
+      <button onclick="closeModal('balance-modal')" class="px-4 py-2 rounded-xl bg-zinc-900 border border-zinc-700 text-xs text-zinc-300 mono">Закрыть</button>
     </div>
   </div>
 </div>
@@ -1585,6 +1703,7 @@ function renderKeyBlock(k, group) {
         <button onclick="copySecret('${k.id}', true)" class="py-2 px-3 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/70 text-xs text-zinc-200 mono transition-all">📄 .env</button>
         <button onclick="exportSetx('${k.id}')" class="py-2 px-3 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/70 text-xs text-amber-300 mono transition-all">🖥 SetX</button>
         <button onclick="pingKey('${k.id}')" class="py-2 px-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/70 text-xs text-zinc-300 mono transition-all">⚡</button>
+        <button onclick="showBalance('key', '${k.id}')" title="Расход, лимит и остаток" class="py-2 px-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/70 text-xs text-amber-300 mono transition-all">💰</button>
       </div>
     </div>`;
 }
@@ -1685,6 +1804,48 @@ async function importSelectedKeys() {
   closeModal('import-modal');
   renderCurrentView();
   showToast(`✅ Импортировано ключей: ${res.added}`);
+}
+
+function fmtMoney(v) {
+  if (v === null || v === undefined || v === '') return '—';
+  const n = Number(v);
+  if (isNaN(n)) return String(v);
+  return '$' + (Math.round(n * 10000) / 10000).toFixed(4);
+}
+
+function fmtNum(v) {
+  if (v === null || v === undefined || v === '') return '—';
+  return String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+}
+
+async function showBalance(kind, id) {
+  const res = await api('/api/balance', { kind: kind, id: id });
+  if (!res.ok) {
+    showToast('💰 ' + (res.msg || 'Баланс недоступен'));
+    return;
+  }
+  renderBalance(res.balance);
+}
+
+function renderBalance(b) {
+  b = b || {};
+  const rows = [
+    ['Потрачено', fmtMoney(b.spent)],
+    ['Лимит', fmtMoney(b.limit)],
+    ['Остаток', fmtMoney(b.remaining)],
+  ];
+  if (b.requests !== null && b.requests !== undefined) rows.push(['Запросов', fmtNum(b.requests)]);
+  if (b.tokens !== null && b.tokens !== undefined) rows.push(['Токенов', fmtNum(b.tokens)]);
+  if (b.status) rows.push(['Статус', b.status]);
+  if (b.source) rows.push(['Источник', b.source]);
+  if (b.extra) rows.push(['Детали', b.extra]);
+  const box = document.getElementById('balance-body');
+  box.innerHTML = rows.map(r => `
+    <div class="flex items-center justify-between gap-4 py-2 border-b border-zinc-800/60 last:border-0">
+      <span class="text-[11px] mono text-zinc-400 shrink-0">${r[0]}</span>
+      <span class="text-[12px] mono text-amber-300 text-right truncate" title="${r[1]}">${r[1]}</span>
+    </div>`).join('');
+  document.getElementById('balance-modal').classList.remove('hidden');
 }
 
 function renderKeys() {
@@ -1957,6 +2118,9 @@ function renderPersonal() {
       <div class="pt-3 border-t border-white/5 mt-auto flex">
         <button onclick="copyPersonalSecret('${k.id}')" class="flex-1 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-[0_0_15px_rgba(16,185,129,0.3)] text-xs mono text-center uppercase tracking-wider transition-all">
           📋 Скопировать
+        </button>
+        <button onclick="showBalance('personal', '${k.id}')" title="Расход, лимит и остаток" class="px-3 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/70 text-xs text-amber-300 mono transition-all">
+          💰
         </button>
       </div>
     `;
@@ -2649,6 +2813,25 @@ class VaultRequestHandler(BaseHTTPRequestHandler):
             VAULT.data["keys"] = keys
             VAULT.save()
             self._send_json({"ok": True, "added": added, "keys": keys})
+
+        elif self.path == "/api/balance":
+            kind = body.get("kind", "personal")
+            key_id = body.get("id")
+            pool = VAULT.data.get("personal", []) if kind == "personal" else VAULT.data.get("keys", [])
+            item = next((x for x in pool if x.get("id") == key_id), None)
+            if not item:
+                self._send_json({"ok": False, "msg": "Ключ не найден"})
+                return
+            bal = fetch_provider_balance(
+                item.get("value", ""),
+                item.get("service") or item.get("provider", ""),
+                item.get("env_name", ""),
+                item.get("base_url", ""),
+            )
+            if not bal:
+                self._send_json({"ok": False, "msg": "Провайдер не отдаёт расход/остаток по этому ключу"})
+                return
+            self._send_json({"ok": True, "balance": bal})
 
         elif self.path == "/api/export_env_file":
             folder = body.get("folder") or BASE_DIR

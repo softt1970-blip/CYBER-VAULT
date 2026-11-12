@@ -101,6 +101,11 @@ def api_check(name, path, body=None, raw=None, method=None, expect_json=True, wa
 
 
 # --------------------------------------------------------------------------- static
+def _strip_regex_literals(js):
+    """Убирает литералы /регулярных выражений/, чтобы \\B( не считался вызовом функции."""
+    return re.sub(r"/(?:\\.|[^/\\\n])+/[gimsuy]*", " ", js)
+
+
 def check_static():
     print("\n[1/5] Компиляция app.py")
     r = subprocess.run([sys.executable, "-m", "py_compile", APP], capture_output=True, text=True)
@@ -157,7 +162,8 @@ def check_static():
         Boolean Date Promise Map Set RegExp Error parseInt parseFloat setTimeout setInterval clearTimeout
         clearInterval fetch alert confirm prompt encodeURIComponent decodeURIComponent isNaN
         structuredClone requestAnimationFrame""".split())
-    called = set(re.findall(r"(?<![\w.$])([A-Za-z_$][\w$]*)\s*\(", js))
+    called = set(re.findall(r"(?<![\w.$])([A-Za-z_$][\w$]*)\s*\(",
+                            _strip_regex_literals(js)))
     missing = sorted(c for c in called if c not in declared and c not in builtin and c != "async")
     if missing:
         fail("JS: вызываются, но не определены: %s" % ", ".join(missing))
