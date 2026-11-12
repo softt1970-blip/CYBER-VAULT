@@ -112,12 +112,16 @@ def check_static():
     print("\n[2/5] pyflakes")
     try:
         r = subprocess.run([sys.executable, "-m", "pyflakes", APP], capture_output=True, text=True)
-        if r.returncode == 0:
-            ok("pyflakes — замечаний нет")
-        else:
-            fail("pyflakes:\n" + r.stdout.strip()[:800])
     except Exception as e:
         info("pyflakes недоступен (%s) — пропуск" % str(e)[:60])
+        return
+    if "No module named pyflakes" in (r.stderr or ""):
+        info("pyflakes не установлен — пропуск (поставьте: pip install pyflakes)")
+        return
+    if r.returncode == 0:
+        ok("pyflakes — замечаний нет")
+    else:
+        fail("pyflakes:\n" + (r.stdout or r.stderr or "").strip()[:800])
 
     print("\n[3/5] Встроенный JavaScript")
     src = io.open(APP, encoding="utf-8").read()
