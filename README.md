@@ -15,7 +15,7 @@ Dark Luxury / Cyber-HUD · Windows · портативный · без обла�
 
 ![Главная страница CYBER-VAULT](docs/screenshot-main.png)
 
-<div align="center"><sub>Карточки провайдеров, маскирование ключей, живая проверка в один клик</sub></div>
+<div align="center"><sub>Карточки провайдеров, маскирование ключей, живая проверка в один клик, сводка бесплатных моделей</sub></div>
 
 ---
 
@@ -76,6 +76,25 @@ OPENROUTER_API_KEY="sk-or-v1-...first,sk-or-v1-...second"
 Фоновый watcher ловит скопированные ключи — и чистые (`sk-or-v1-…`, `AIza…`, `gsk_…`, `ghp_…`),
 и блоки вида `KEY="VALUE"` — и предлагает внести их в базу одним кликом.
 
+### 🎁 Сводка по моделям
+
+Вкладка **🎁 Модели** спрашивает у каждого ключа его каталог (`/v1/models`) и собирает
+**бесплатные модели** в одной таблице: сколько уникальных, сколько ключей их открывают,
+какой у модели контекст.
+
+![Сводка по моделям CYBER-VAULT](docs/screenshot-models.png)
+
+| | |
+|---|---|
+| 🆓 **Бесплатные модели** | Отмечаются по маркеру в id (`:free`, `free/`) и по нулевой цене — платные `*-latest` не попадают |
+| 🔢 **Счётчик уникальных** | В сайдбаре — сколько разных бесплатных моделей открывают ваши ключи |
+| 🔑 **Блок по ключам** | Только ключи с бесплатными моделями: сколько моделей и сколько всего в каталоге |
+| ⚠️ **Предупреждения** | Битые ключи и провайдеры без каталога видно сразу, а не по ошибке в логе |
+| 💳 **Квота и баланс** | Дневная квота бесплатных запросов OpenRouter, баланс Kimi, заголовки rate-limit |
+| 🔄 **Только по кнопке** | Обновление запускается вручную и идёт в фоне — интерфейс не подвисает |
+
+Ключ при этом уходит **только своему провайдеру** — тому, чей `base_url` указан в карточке.
+
 ### 🤖 Диспетчер ИИ-агентов
 
 | | |
@@ -112,6 +131,7 @@ OPENROUTER_API_KEY="sk-or-v1-...first,sk-or-v1-...second"
 | Зависимости | `libs\` (`pip --target`, глобальный Python не трогаем) |
 | Хранилище | `vault.json` в корне |
 | Бекапы | `backup\vault_*.json` |
+| Кэш сводки по моделям | `models_cache.json` в корне |
 | Заметки для Блокнота | `notes\` |
 | Экспорт `.env` | только внутри папки проекта |
 
@@ -129,6 +149,9 @@ OPENROUTER_API_KEY="sk-or-v1-...first,sk-or-v1-...second"
 
 - `vault.json` и папка `backup\` **не должны попадать в git** — в `.gitignore` они уже есть.
 - Копия ключа автоматически стирается из буфера обмена через 15 секунд.
+- Кнопка «🔄 Обновить информацию» отправляет ключ **только его провайдеру** — по `base_url`
+  из карточки. Сторонних сервисов нет. В `models_cache.json` значений ключей нет: только
+  id моделей, контекст, цены и id ключей. Сам файл тоже закрыт в `.gitignore`.
 - Для переноса на другую машину положите папку на шифрованный диск или в архив с паролем.
 - Ключи в примерах и на скриншотах — демонстрационные, они не рабочие.
 
@@ -157,6 +180,7 @@ CYBER-VAULT/
 ├── app.py                 всё приложение: Python-бэкенд + интерфейс
 ├── start.bat              лаунчер
 ├── vault.example.json     пример хранилища
+├── models_cache.json      кэш сводки по моделям (не в git)
 ├── tools/check.py         проверка проекта
 ├── docs/                  скриншоты
 ├── libs/                  локальные зависимости (не в git)
@@ -175,6 +199,8 @@ manages API keys, portable AI agents and personal secrets — entirely inside on
 - Multi-key providers: pick a primary key (★) or enable comma-separated rotation (⇄)
 - `.env` builder per provider, `.env` importer with automatic provider detection
 - Clipboard watcher that catches copied API keys
+- Free-model summary per key: catalogue probe, unique free models with context length,
+  provider quota and balance — refreshed manually, never automatically
 - AI-agent dispatcher: icons extracted from the real `.exe`, smart target resolution, linked
   keys injected into the launched process environment
 - Personal vault with notes that open in Notepad
