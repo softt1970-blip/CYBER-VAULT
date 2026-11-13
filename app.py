@@ -879,6 +879,409 @@ def check_key_health(key_obj: dict) -> dict:
         return {"ok": False, "msg": f"Ошибка соединения: {str(e)[:35]}"}
 
 
+# ---------------- сводка по моделям: каталог бесплатных моделей по ключам ----------------
+
+MODELS_CACHE_FILE = os.path.join(BASE_DIR, "models_cache.json")
+MODELS_PROBE_LOCK = threading.Lock()
+MODELS_PROBE_STATE = {
+    "running": False,
+    "done": 0,
+    "total": 0,
+    "current": "",
+    "started_at": "",
+    "finished_at": "",
+    "error": "",
+}
+
+FREE_ID_MARKERS = (":free", "free/")
+FREE_TOKEN_RE = re.compile(r"(^|[^a-z0-9])(test|trial)([^a-z0-9]|$)", re.I)
+
+
+def _is_free_model_id(model_id):
+    """Бесплатная модель: маркер в id (:free, free/, test, trial)."""
+    mid = (model_id or "").strip().lower()
+    if not mid:
+        return False
+    if any(m in mid for m in FREE_ID_MARKERS):
+        return True
+    return bool(FREE_TOKEN_RE.search(mid))
+
+
+def _to_float(val):
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _to_int(val):
+    try:
+        return int(float(val))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parse_json(raw):
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"_raw": (raw or "")[:300]}
+
+
+def _http_fetch(url, value="", timeout=8, extra_headers=None):
+    """GET с Bearer-токеном. Возвращает (status, data, headers)."""
+    headers = {"User-Agent": "CyberVault/1.7", "Accept": "application/json"}
+    if value:
+        headers["Authorization"] = "Bearer %s" % value
+    if extra_headers:
+        headers.update(extra_headers)
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+            hdrs = {str(k).lower(): str(v) for k, v in resp.headers.items()}
+            return resp.status, _parse_json(raw), hdrs
+    except urllib.error.HTTPError as e:
+        raw = ""
+        try:
+            raw = e.read().decode("utf-8", "replace")
+        except Exception:
+            pass
+        hdrs = {}
+        try:
+            hdrs = {str(k).lower(): str(v) for k, v in (e.headers or {}).items()}
+        except Exception:
+            pass
+        return e.code, _parse_json(raw), hdrs
+    except Exception as e:
+        return 0, {"error": str(e)[:160]}, {}
+
+
+def _models_url(base_url):
+    """Адрес каталога моделей: {base}/models, если base кончается на /v1, иначе {base}/v1/models."""
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        return ""
+    if base.endswith("/v1"):
+        return base + "/models"
+    return base + "/v1/models"
+
+
+def _extract_models(data):
+    """Модели из ответа каталога (data / models / result / items)."""
+    items = []
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        for field in ("data", "models", "result", "results", "items"):
+            val = data.get(field)
+            if isinstance(val, list):
+                items = val
+                break
+    out = []
+    for item in items:
+        if isinstance(item, str):
+            out.append({"id": item, "context": 0, "price_in": 0.0, "price_out": 0.0})
+            continue
+        if not isinstance(item, dict):
+            continue
+        mid = item.get("id") or item.get("name") or item.get("model") or item.get("model_id") or ""
+        if not mid:
+            continue
+        ctx = (item.get("context_length") or item.get("context_window")
+               or item.get("max_context_length") or 0)
+        pricing = item.get("pricing") if isinstance(item.get("pricing"), dict) else {}
+        pin = pricing.get("prompt")
+        if pin is None:
+            pin = pricing.get("input")
+        pout = pricing.get("completion")
+        if pout is None:
+            pout = pricing.get("output")
+        out.append({
+            "id": str(mid),
+            "context": _to_int(ctx),
+            "price_in": _to_float(pin),
+            "price_out": _to_float(pout),
+        })
+    return out
+
+
+def _free_models_of(models):
+    """Бесплатные модели: маркер в id, кроме явно платных по pricing."""
+    out = []
+    for m in models:
+        if not _is_free_model_id(m.get("id")):
+            continue
+        if m.get("price_in", 0) > 0 and m.get("price_out", 0) > 0:
+            continue
+        out.append(m)
+    out.sort(key=lambda x: x.get("id", ""))
+    return out
+
+
+def _rate_limits_from_headers(hdrs):
+    out = []
+    for name, val in (hdrs or {}).items():
+        if name.startswith("x-ratelimit") or name.startswith("x-rl"):
+            out.append({"name": name, "value": val})
+    out.sort(key=lambda x: x["name"])
+    return out
+
+
+def _probe_quota(key_obj, value):
+    """Бесплатная квота (OpenRouter /api/v1/auth/key)."""
+    hay = ("%s %s %s" % (key_obj.get("service") or "",
+                         key_obj.get("env_name") or "",
+                         key_obj.get("base_url") or "")).lower()
+    if "openrouter" not in hay and not value.startswith("sk-or-v1-"):
+        return None
+    status, data, _ = _http_fetch("https://openrouter.ai/api/v1/auth/key", value)
+    if status != 200 or not isinstance(data, dict):
+        return None
+    info = data.get("data") if isinstance(data.get("data"), dict) else data
+    quota = None
+    for field in ("free_model_daily_requests", "free_model_daily", "daily_requests", "rate_limit"):
+        val = info.get(field)
+        if isinstance(val, dict):
+            quota = val
+            break
+    if not quota:
+        return None
+    used = quota.get("used")
+    limit = quota.get("limit")
+    remaining = quota.get("remaining")
+    if remaining is None and isinstance(used, (int, float)) and isinstance(limit, (int, float)):
+        remaining = max(0, limit - used)
+    return {
+        "used": _to_int(used),
+        "limit": _to_int(limit),
+        "remaining": _to_int(remaining),
+        "window": "day",
+        "free_tier": bool(info.get("is_free_tier")),
+    }
+
+
+def _probe_balance(key_obj, value):
+    """Баланс: {base}/v1/users/me/balance."""
+    base = (key_obj.get("base_url") or "").strip().rstrip("/")
+    if not base:
+        return None
+    url = base + ("/users/me/balance" if base.endswith("/v1") else "/v1/users/me/balance")
+    status, data, _ = _http_fetch(url, value)
+    if status != 200 or not isinstance(data, dict):
+        return None
+    body = data.get("data") if isinstance(data.get("data"), dict) else data
+    avail = body.get("available_balance")
+    if avail is None:
+        avail = body.get("balance")
+    voucher = body.get("voucher_balance")
+    if avail is None and voucher is None:
+        return None
+    return {
+        "available": _to_float(avail),
+        "voucher": _to_float(voucher),
+        "currency": body.get("currency") or "",
+    }
+
+
+def probe_key(key_obj):
+    """Проба одного ключа: каталог моделей + квота + баланс + заголовки лимитов."""
+    out = {
+        "ok": False,
+        "status": 0,
+        "error": "",
+        "models_total": 0,
+        "free_models": [],
+        "quota": None,
+        "balance": None,
+        "rate_limits": [],
+        "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    value = (key_obj.get("value") or "").strip()
+    if not value:
+        out["error"] = "Ключ пустой"
+        return out
+    url = _models_url(key_obj.get("base_url"))
+    if not url:
+        out["error"] = "Не задан base_url — каталог моделей недоступен"
+        return out
+    status, data, hdrs = _http_fetch(url, value, timeout=8)
+    out["status"] = status
+    if status == 200:
+        models = _extract_models(data)
+        out["models_total"] = len(models)
+        out["free_models"] = _free_models_of(models)
+        out["ok"] = True
+        if not models:
+            out["error"] = "Ответ без списка моделей"
+    elif status == 0:
+        out["error"] = "Нет связи с провайдером"
+    elif status in (401, 403):
+        out["error"] = "Ключ не проходит авторизацию (HTTP %d)" % status
+    else:
+        out["error"] = "HTTP %d" % status
+    out["rate_limits"] = _rate_limits_from_headers(hdrs)
+    out["quota"] = _probe_quota(key_obj, value)
+    out["balance"] = _probe_balance(key_obj, value)
+    return out
+
+
+def load_models_cache():
+    """Читает models_cache.json (файла нет — пустой кэш)."""
+    empty = {"updated_at": "", "keys": {}}
+    if not os.path.exists(MODELS_CACHE_FILE):
+        return empty
+    try:
+        with open(MODELS_CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return empty
+        if not isinstance(data.get("keys"), dict):
+            data["keys"] = {}
+        return data
+    except Exception:
+        return empty
+
+
+def save_models_cache(data):
+    """Атомарная запись models_cache.json в папке проекта."""
+    tmp = "%s.tmp-%d" % (MODELS_CACHE_FILE, os.getpid())
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, MODELS_CACHE_FILE)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+
+
+def _run_models_probe(keys):
+    """Фоновый обход ключей: проба каждого и запись кэша."""
+    cache = load_models_cache()
+    entries = cache.get("keys") or {}
+    for k in keys:
+        kid = k.get("id")
+        MODELS_PROBE_STATE["current"] = k.get("service") or kid or ""
+        try:
+            entries[kid] = probe_key(k)
+        except Exception as e:
+            entries[kid] = {
+                "ok": False, "status": 0, "error": str(e)[:160], "models_total": 0,
+                "free_models": [], "quota": None, "balance": None,
+                "rate_limits": [], "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+        MODELS_PROBE_STATE["done"] += 1
+    live = set(k.get("id") for k in VAULT.data.get("keys", []))
+    for kid in list(entries.keys()):
+        if kid not in live:
+            entries.pop(kid, None)
+    cache["keys"] = entries
+    cache["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    save_models_cache(cache)
+    MODELS_PROBE_STATE["current"] = ""
+    MODELS_PROBE_STATE["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    MODELS_PROBE_STATE["running"] = False
+
+
+def start_models_probe(key_id=None):
+    """Запускает пробу ключей в фоновом потоке. Возвращает (статус, сообщение)."""
+    with MODELS_PROBE_LOCK:
+        if MODELS_PROBE_STATE.get("running"):
+            return "running", "Проверка уже идёт"
+        keys = list(VAULT.data.get("keys", []))
+        if key_id:
+            keys = [k for k in keys if k.get("id") == key_id]
+            if not keys:
+                return "not_found", "Ключ не найден"
+        if not keys:
+            return "empty", "В хранилище нет ключей"
+        MODELS_PROBE_STATE.update({
+            "running": True,
+            "done": 0,
+            "total": len(keys),
+            "current": "",
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "finished_at": "",
+            "error": "",
+        })
+    threading.Thread(target=_run_models_probe, args=(keys,), daemon=True).start()
+    return "started", "Проверка запущена: ключей %d" % len(keys)
+
+
+def models_summary():
+    """Кэш + агрегация: уникальные модели, кто их даёт, предупреждения."""
+    cache = load_models_cache()
+    entries = cache.get("keys") or {}
+    meta = {}
+    for k in VAULT.data.get("keys", []):
+        meta[k.get("id")] = k
+    unique = {}
+    by_key = []
+    warnings = []
+    for kid, entry in entries.items():
+        m = meta.get(kid) or {}
+        free_models = entry.get("free_models") or []
+        by_key.append({
+            "key_id": kid,
+            "service": m.get("service") or kid,
+            "env_name": m.get("env_name") or "",
+            "base_url": m.get("base_url") or "",
+            "ok": bool(entry.get("ok")),
+            "status": entry.get("status") or 0,
+            "error": entry.get("error") or "",
+            "models_total": entry.get("models_total") or 0,
+            "free_count": len(free_models),
+            "free_models": free_models,
+            "quota": entry.get("quota"),
+            "balance": entry.get("balance"),
+            "rate_limits": entry.get("rate_limits") or [],
+            "checked_at": entry.get("checked_at") or "",
+        })
+        for mm in free_models:
+            mid = mm.get("id")
+            u = unique.setdefault(mid, {"id": mid, "context": 0, "keys": []})
+            u["keys"].append(kid)
+            if (mm.get("context") or 0) > u["context"]:
+                u["context"] = mm.get("context") or 0
+    for kid, k in meta.items():
+        if kid not in entries:
+            warnings.append({
+                "key_id": kid, "service": k.get("service") or kid, "kind": "not_probed",
+                "text": "не проверялся",
+            })
+    for row in by_key:
+        if not row["ok"]:
+            warnings.append({
+                "key_id": row["key_id"], "service": row["service"], "kind": "failed",
+                "text": row["error"] or "проба не удалась",
+            })
+    models = []
+    for u in unique.values():
+        models.append({
+            "id": u["id"], "context": u["context"],
+            "keys": u["keys"], "keys_count": len(u["keys"]),
+        })
+    models.sort(key=lambda x: (-x["keys_count"], x["id"]))
+    by_key.sort(key=lambda r: (-r["free_count"], (r["service"] or "").lower()))
+    multi = [m for m in models if m["keys_count"] > 1]
+    return {
+        "ok": True,
+        "updated_at": cache.get("updated_at") or "",
+        "keys_total": len(meta),
+        "keys_probed": len(entries),
+        "keys_ok": sum(1 for r in by_key if r["ok"]),
+        "keys_failed": sum(1 for r in by_key if not r["ok"]),
+        "unique_models": len(models),
+        "multi_models": len(multi),
+        "models": models,
+        "by_key": by_key,
+        "warnings": warnings,
+    }
+
+
 COLOR_ICON_SVG_DATA = "data:image/svg+xml;utf8," + urllib.parse.quote(
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
     '<rect x="4" y="4" width="56" height="56" rx="14" fill="#0c1317" stroke="#355C69" stroke-width="3"/>'
@@ -1069,6 +1472,12 @@ HTML_UI = r"""<!DOCTYPE html>
           <span id="count-personal" class="text-xs mono px-2 py-0.5 rounded-md bg-emerald-950 text-emerald-400">0</span>
         </button>
 
+        <!-- Вкладка Модели -->
+        <button onclick="setCategory('models')" id="cat-models" class="cat-btn w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all border border-transparent hover:bg-fuchsia-900/20 text-fuchsia-400 mt-1">
+          <span>🎁 Модели</span>
+          <span id="count-models" class="text-xs mono px-2 py-0.5 rounded-md bg-fuchsia-950 text-fuchsia-300">0</span>
+        </button>
+
         <div class="pt-3 mt-3 border-t border-white/10">
           <div class="text-[10px] uppercase tracking-widest text-zinc-500 mono px-3 mb-2">Фильтр API по группам</div>
           <button onclick="setCategory('ai')" id="cat-ai" class="cat-btn w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all">
@@ -1113,13 +1522,69 @@ HTML_UI = r"""<!DOCTYPE html>
     </aside>
 
     <main class="flex-1 overflow-y-auto p-6 relative">
-      <div id="keys-view" class="grid grid-cols-1 xl:grid-cols-2 gap-4 auto-rows-fr"></div>
+      <div id="keys-view-wrap">
+        <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <div id="keys-models-updated" class="text-[11px] mono text-zinc-500">обновлено: —</div>
+          <button onclick="refreshModels()" class="px-3.5 py-2 rounded-xl amber-cta text-xs mono uppercase tracking-wider">🔄 Обновить информацию</button>
+        </div>
+        <div id="keys-view" class="grid grid-cols-1 xl:grid-cols-2 gap-4 auto-rows-fr"></div>
+      </div>
 
       <!-- ВЬЮХА АГЕНТОВ ИИ -->
       <div id="agents-view" class="hidden grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-5 auto-rows-fr"></div>
       
       <!-- ВЬЮХА ЛИЧНЫХ КЛЮЧЕЙ -->
       <div id="personal-view" class="hidden grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-5 auto-rows-fr"></div>
+
+      <!-- ВЬЮХА МОДЕЛЕЙ -->
+      <div id="models-view" class="hidden max-w-6xl mx-auto space-y-5">
+        <div class="hud-card rounded-2xl p-5">
+          <span class="hud-corner-tl"></span><span class="hud-corner-tr"></span>
+          <span class="hud-corner-bl"></span><span class="hud-corner-br"></span>
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 class="text-lg font-bold text-white">🎁 Сводка по моделям</h2>
+              <p class="text-xs text-zinc-400 mt-0.5">Бесплатные модели по каждому ключу. Обновление только по кнопке.</p>
+            </div>
+            <button id="models-refresh-btn" onclick="refreshModels()" class="px-4 py-2 rounded-xl amber-cta text-xs mono uppercase tracking-wider">🔄 Обновить информацию</button>
+          </div>
+          <div class="mt-3 flex flex-wrap items-center gap-3 text-[11px] mono">
+            <span id="models-updated" class="text-zinc-500">обновлено: —</span>
+            <span id="models-progress" class="text-amber-400"></span>
+          </div>
+          <div id="models-summary" class="mt-4 grid grid-cols-2 md:grid-cols-4 gap-3"></div>
+          <div id="models-warnings" class="mt-4 space-y-1.5"></div>
+        </div>
+
+        <div class="hud-card rounded-2xl overflow-hidden">
+          <span class="hud-corner-tl"></span><span class="hud-corner-tr"></span>
+          <span class="hud-corner-bl"></span><span class="hud-corner-br"></span>
+          <div class="px-5 py-4 border-b border-white/10 bg-zinc-900/40">
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider mono">Уникальные бесплатные модели</h2>
+            <p class="text-xs text-zinc-400 mt-0.5">Сколько ключей открывает каждую модель.</p>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse">
+              <thead>
+                <tr class="border-b border-white/10 text-[11px] uppercase tracking-wider text-zinc-400 mono bg-black/30">
+                  <th class="py-3 px-4">Модель</th>
+                  <th class="py-3 px-4">Контекст</th>
+                  <th class="py-3 px-4 text-right">Ключей</th>
+                </tr>
+              </thead>
+              <tbody id="models-unique-body" class="divide-y divide-white/5 text-sm"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="hud-card rounded-2xl p-5">
+          <span class="hud-corner-tl"></span><span class="hud-corner-tr"></span>
+          <span class="hud-corner-bl"></span><span class="hud-corner-br"></span>
+          <h2 class="text-sm font-bold text-white uppercase tracking-wider mono">По ключам</h2>
+          <p class="text-xs text-zinc-400 mt-0.5">Только ключи с бесплатными моделями.</p>
+          <div id="models-bykey" class="mt-3 space-y-3"></div>
+        </div>
+      </div>
 
       <div id="list-view" class="hidden">
         <div class="hud-card rounded-2xl overflow-hidden">
@@ -1424,6 +1889,8 @@ let PING_STATUS = {};
 let CLIP_INTERVAL = null;
 let CURRENT_INTERCEPT = null;
 let KEY_SEQ = 0;
+let MODELS_DATA = null;
+let MODELS_PROBING = false;
 
 async function api(path, body = null) {
   const opts = body ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) } : {};
@@ -1468,7 +1935,10 @@ async function initStatus() {
     pingAllKeys();
   }
   
-  setCategory('all');
+  loadModelsCache();
+  const cats = ['all', 'list_view', 'agents', 'personal', 'models', 'env_builder', 'ai', 'bots', 'cloud'];
+  const hash = (window.location.hash || '').replace('#', '');
+  setCategory(cats.indexOf(hash) >= 0 ? hash : 'all');
 }
 
 setInterval(async () => {
@@ -1535,6 +2005,9 @@ function toggleViewMode() {
 
 function setCategory(cat) {
   CURRENT_CAT = cat;
+  try {
+    if (window.history && window.history.replaceState) window.history.replaceState(null, '', '#' + cat);
+  } catch (e) {}
   document.querySelectorAll('.cat-btn').forEach(btn => {
     btn.className = 'cat-btn w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all text-zinc-400 hover:bg-zinc-900/60 hover:text-zinc-200 border border-transparent';
   });
@@ -1545,6 +2018,8 @@ function setCategory(cat) {
       activeBtn.className = 'cat-btn w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all bg-cyan-900/30 text-cyan-300 border border-cyan-500/40 shadow-[0_0_15px_rgba(8,145,178,0.15)] mt-1';
     } else if (cat === 'personal') {
       activeBtn.className = 'cat-btn w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all bg-emerald-900/30 text-emerald-300 border border-emerald-500/40 shadow-[0_0_15px_rgba(16,185,129,0.15)] mt-1';
+    } else if (cat === 'models') {
+      activeBtn.className = 'cat-btn w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all bg-fuchsia-900/30 text-fuchsia-300 border border-fuchsia-500/40 shadow-[0_0_15px_rgba(217,70,239,0.15)] mt-1';
     } else {
       activeBtn.className = 'cat-btn w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all bg-amber-500/10 text-amber-400 border border-amber-500/30 shadow-[0_0_15px_rgba(245,158,11,0.1)]';
     }
@@ -1562,17 +2037,22 @@ function setCategory(cat) {
     addBtn.innerHTML = '<span>+</span> Личный ключ';
     addBtn.onclick = () => openPersonalModal();
     addBtn.className = 'px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs uppercase tracking-wider mono flex items-center gap-1.5 shadow-[0_0_15px_rgba(16,185,129,0.4)] transition-all';
+  } else if (cat === 'models') {
+    addBtn.innerHTML = '<span>🔄</span> Обновить модели';
+    addBtn.onclick = () => refreshModels();
+    addBtn.className = 'px-4 py-2 rounded-xl bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-bold text-xs uppercase tracking-wider mono flex items-center gap-1.5 shadow-[0_0_15px_rgba(217,70,239,0.4)] transition-all';
   } else {
     addBtn.innerHTML = '<span>+</span> Новый ключ';
     addBtn.onclick = () => openModal();
     addBtn.className = 'px-4 py-2 rounded-xl amber-cta text-xs uppercase tracking-wider mono flex items-center gap-1.5';
   }
 
-  document.getElementById('keys-view').classList.add('hidden');
+  document.getElementById('keys-view-wrap').classList.add('hidden');
   document.getElementById('list-view').classList.add('hidden');
   document.getElementById('env-builder-view').classList.add('hidden');
   document.getElementById('agents-view').classList.add('hidden');
   document.getElementById('personal-view').classList.add('hidden');
+  document.getElementById('models-view').classList.add('hidden');
 
   if (cat === 'env_builder') {
     document.getElementById('env-builder-view').classList.remove('hidden');
@@ -1586,8 +2066,11 @@ function setCategory(cat) {
   } else if (cat === 'personal') {
     document.getElementById('personal-view').classList.remove('hidden');
     renderPersonal();
+  } else if (cat === 'models') {
+    document.getElementById('models-view').classList.remove('hidden');
+    renderModelsView();
   } else {
-    document.getElementById('keys-view').classList.remove('hidden');
+    document.getElementById('keys-view-wrap').classList.remove('hidden');
     renderKeys();
   }
 }
@@ -1597,6 +2080,7 @@ function renderCurrentView() {
   else if (CURRENT_CAT === 'env_builder') renderEnvBuilder();
   else if (CURRENT_CAT === 'agents') renderAgents();
   else if (CURRENT_CAT === 'personal') renderPersonal();
+  else if (CURRENT_CAT === 'models') renderModelsView();
   else renderKeys();
 }
 
@@ -2459,6 +2943,160 @@ async function saveEnvToFile() {
   showToast(res.msg);
 }
 
+// ---------------- сводка по моделям ----------------
+
+function escapeHtml(s) {
+  return String(s === null || s === undefined ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function formatModelsTime(ts) {
+  if (!ts) return 'обновлено: —';
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return 'обновлено: ' + ts;
+  const dd = d.getDate() < 10 ? '0' + d.getDate() : String(d.getDate());
+  const mm = d.getMonth() + 1;
+  const m2 = mm < 10 ? '0' + mm : String(mm);
+  const hh = d.getHours() < 10 ? '0' + d.getHours() : String(d.getHours());
+  const mi = d.getMinutes() < 10 ? '0' + d.getMinutes() : String(d.getMinutes());
+  return 'обновлено: ' + dd + '.' + m2 + '.' + d.getFullYear() + ' ' + hh + ':' + mi;
+}
+
+function setModelsTimestamp(ts) {
+  const text = formatModelsTime(ts);
+  const a = document.getElementById('models-updated');
+  if (a) a.textContent = text;
+  const b = document.getElementById('keys-models-updated');
+  if (b) b.textContent = text;
+}
+
+function setModelsProgress(text) {
+  const el = document.getElementById('models-progress');
+  if (el) el.textContent = text || '';
+}
+
+async function loadModelsCache() {
+  const res = await api('/api/models_cache');
+  if (!res.ok) return null;
+  MODELS_DATA = res;
+  setModelsTimestamp(res.updated_at);
+  renderModelsView();
+  return res;
+}
+
+async function refreshModels() {
+  if (MODELS_PROBING) { showToast('⏳ Обновление уже идёт'); return; }
+  MODELS_PROBING = true;
+  setModelsProgress('проверка запущена...');
+  showToast('🔍 Проверяю модели по ключам...');
+  const res = await api('/api/models_probe', {});
+  if (!res.ok) {
+    MODELS_PROBING = false;
+    setModelsProgress('');
+    showToast('❌ ' + (res.msg || 'Не удалось запустить проверку'));
+    return;
+  }
+  pollModelsStatus();
+}
+
+async function pollModelsStatus() {
+  const st = await api('/api/models_probe_status');
+  if (!st.ok) { MODELS_PROBING = false; return; }
+  if (st.running) {
+    let txt = 'проверено ' + (st.done || 0) + ' из ' + (st.total || 0);
+    if (st.current) txt += ' · ' + st.current;
+    setModelsProgress(txt);
+    setTimeout(pollModelsStatus, 1500);
+    return;
+  }
+  MODELS_PROBING = false;
+  setModelsProgress('');
+  await loadModelsCache();
+  showToast('✅ Модели обновлены');
+}
+
+function renderModelsView() {
+  const sumEl = document.getElementById('models-summary');
+  if (!sumEl) return;
+  const warnEl = document.getElementById('models-warnings');
+  const bodyEl = document.getElementById('models-unique-body');
+  const keyEl = document.getElementById('models-bykey');
+  const d = MODELS_DATA;
+
+  if (!d) {
+    sumEl.innerHTML = '<div class="col-span-full py-8 text-center text-zinc-500 mono text-xs">Нажмите «🔄 Обновить информацию» — соберём каталог бесплатных моделей по ключам</div>';
+    warnEl.innerHTML = '';
+    bodyEl.innerHTML = '<tr><td colspan="3" class="py-8 text-center text-zinc-500 mono text-xs">Данных нет</td></tr>';
+    keyEl.innerHTML = '<div class="py-6 text-center text-zinc-500 mono text-xs">Данных нет</div>';
+    return;
+  }
+
+  setModelsTimestamp(d.updated_at);
+  const counter = document.getElementById('count-models');
+  if (counter) counter.textContent = d.unique_models || 0;
+
+  const tiles = [
+    { label: 'Уникальных бесплатных', value: d.unique_models || 0, cls: 'text-fuchsia-300' },
+    { label: 'Доступны нескольким ключам', value: d.multi_models || 0, cls: 'text-cyan-300' },
+    { label: 'Ключей проверено', value: (d.keys_ok || 0) + ' / ' + (d.keys_total || 0), cls: 'text-emerald-300' },
+    { label: 'Ключей с ошибкой', value: d.keys_failed || 0, cls: (d.keys_failed ? 'text-rose-400' : 'text-zinc-300') }
+  ];
+  sumEl.innerHTML = tiles.map(t => `
+    <div class="rounded-xl bg-zinc-900/60 border border-zinc-800 px-4 py-3">
+      <div class="text-[10px] uppercase tracking-wider text-zinc-500 mono">${t.label}</div>
+      <div class="text-2xl font-bold mono mt-1 ${t.cls}">${t.value}</div>
+    </div>`).join('');
+
+  const warns = d.warnings || [];
+  if (warns.length) {
+    warnEl.innerHTML = warns.slice(0, 12).map(w => `
+      <div class="flex items-start gap-2 text-[11px] mono px-3 py-2 rounded-lg bg-rose-950/25 border border-rose-800/40 text-rose-300">
+        <span>⚠</span><span>${escapeHtml(w.service)} — ${escapeHtml(w.text)}</span>
+      </div>`).join('');
+  } else {
+    warnEl.innerHTML = '<div class="text-[11px] mono text-emerald-400/80">✓ Все ключи отвечают</div>';
+  }
+
+  const models = d.models || [];
+  if (models.length) {
+    bodyEl.innerHTML = models.map(m => `
+      <tr class="hover:bg-zinc-900/40">
+        <td class="py-2.5 px-4 mono text-xs text-amber-300">${escapeHtml(m.id)}</td>
+        <td class="py-2.5 px-4 mono text-xs text-zinc-400">${m.context ? m.context.toLocaleString('ru-RU') : '—'}</td>
+        <td class="py-2.5 px-4 text-right mono text-xs ${m.keys_count > 1 ? 'text-cyan-300' : 'text-zinc-500'}">${m.keys_count}</td>
+      </tr>`).join('');
+  } else {
+    bodyEl.innerHTML = '<tr><td colspan="3" class="py-8 text-center text-zinc-500 mono text-xs">Бесплатных моделей не найдено</td></tr>';
+  }
+
+  const rows = (d.by_key || []).filter(r => r.free_count > 0);
+  if (rows.length) {
+    keyEl.innerHTML = rows.map(r => {
+      const bits = [];
+      if (r.quota) bits.push('квота ' + (r.quota.remaining || 0) + '/' + (r.quota.limit || 0) + ' (' + (r.quota.window || 'day') + ')');
+      if (r.balance) bits.push('баланс ' + r.balance.available + (r.balance.currency ? ' ' + r.balance.currency : ''));
+      if ((r.rate_limits || []).length) bits.push('заголовков лимитов: ' + r.rate_limits.length);
+      const meta = bits.join(' · ');
+      const modelsHtml = (r.free_models || []).map(m => `<span class="text-[10px] mono px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300">${escapeHtml(m.id)}</span>`).join('');
+      return `
+      <div class="rounded-xl bg-zinc-900/60 border border-zinc-800 p-4">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="text-sm font-semibold text-white">${escapeHtml(r.service)} <span class="text-[10px] mono text-zinc-500">${escapeHtml(r.env_name)}</span></div>
+          <div class="text-[10px] mono px-2 py-0.5 rounded bg-fuchsia-950 text-fuchsia-300">${r.free_count} бесплатных · всего ${r.models_total}</div>
+        </div>
+        <div class="mt-2 flex flex-wrap gap-1.5">${modelsHtml}</div>
+        ${meta ? `<div class="mt-2 text-[10px] mono text-zinc-500">${escapeHtml(meta)}</div>` : ''}
+      </div>`;
+    }).join('');
+  } else {
+    keyEl.innerHTML = '<div class="py-6 text-center text-zinc-500 mono text-xs">У ключей нет бесплатных моделей</div>';
+  }
+}
+
+
 initStatus();
 </script>
 </body>
@@ -2505,6 +3143,18 @@ class VaultRequestHandler(BaseHTTPRequestHandler):
         elif self.path == "/api/poll_clipboard":
             detected = DETECTED_KEY_QUEUE.pop(0) if DETECTED_KEY_QUEUE else None
             self._send_json({"detected": detected})
+        elif self.path == "/api/models_cache":
+            self._send_json(models_summary())
+        elif self.path == "/api/models_probe_status":
+            state = dict(MODELS_PROBE_STATE)
+            state["ok"] = True
+            if state.get("running"):
+                state["message"] = "проверено %d из %d" % (state.get("done", 0), state.get("total", 0))
+            elif state.get("total"):
+                state["message"] = "готово: %d из %d" % (state.get("done", 0), state.get("total", 0))
+            else:
+                state["message"] = "не запускалось"
+            self._send_json(state)
         else:
             self.send_error(404)
 
@@ -2853,6 +3503,16 @@ class VaultRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "msg": "Провайдер не отдаёт расход/остаток по этому ключу"})
                 return
             self._send_json({"ok": True, "balance": bal})
+
+        elif self.path == "/api/models_probe":
+            key_id = (body.get("key_id") or "").strip() or None
+            status, msg = start_models_probe(key_id)
+            if status == "not_found":
+                self._send_json({"ok": False, "msg": msg})
+            elif status == "empty":
+                self._send_json({"ok": False, "msg": msg})
+            else:
+                self._send_json({"ok": True, "msg": msg, "running": status == "running"})
 
         elif self.path == "/api/export_env_file":
             folder = body.get("folder") or BASE_DIR

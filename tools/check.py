@@ -179,6 +179,13 @@ def check_static():
     else:
         ok("JS: все onclick-обработчики определены")
 
+    gi_path = os.path.join(ROOT, ".gitignore")
+    gi = io.open(gi_path, encoding="utf-8").read() if os.path.exists(gi_path) else ""
+    if "models_cache.json" in gi and "models_cache.json" in src:
+        ok("models_cache.json — кэш в .gitignore, путь задан в app.py")
+    else:
+        fail("models_cache.json — нет в .gitignore или нет упоминания в app.py")
+
 
 # --------------------------------------------------------------------------- sweep
 def check_endpoints():
@@ -235,6 +242,9 @@ def check_endpoints():
     api_check("open_note", "/api/open_note", {"id": PFX + "p"})
     api_check("sync_note", "/api/sync_note", {"id": PFX + "p"})
     api_check("sync_note (нет файла)", "/api/sync_note", {"id": "нет-такого"}, want=False)
+    api_check("GET /api/models_cache", "/api/models_cache")
+    api_check("GET /api/models_probe_status", "/api/models_probe_status")
+    api_check("models_probe (нет такого ключа)", "/api/models_probe", {"key_id": "нет-такого"}, want=False)
 
     st, txt = http("/api/save_key", raw="{это не json")
     (ok if st == 400 else fail)("битый JSON -> HTTP %s" % st)
