@@ -2615,8 +2615,16 @@ function renderPersonal() {
         </div>
         
         ${k.notes ? `<div class="mt-3 flex items-start gap-2">
-          <div onclick="openPersonalNote('${k.id}')" class="flex-1 text-[11px] text-zinc-400 p-2.5 rounded-lg bg-zinc-900/50 border border-zinc-800/50 cursor-pointer hover:border-emerald-500/40 hover:text-zinc-300 transition-colors line-clamp-2" title="Нажмите, чтобы открыть в блокноте">📝 ${k.notes}</div>
-          <button onclick="syncPersonalNote('${k.id}')" title="Забрать изменения из блокнота" class="px-2 py-1.5 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-emerald-400 text-xs shrink-0">⟳</button>
+          <div class="flex-1 flex flex-col gap-2">
+            <textarea id="personal-note-${k.id}" rows="2" placeholder="Примечание..."
+              oninput="personalNoteInput('${k.id}', this.value)"
+              onblur="personalNoteSave('${k.id}')"
+              class="w-full text-[11px] text-zinc-400 p-2.5 rounded-lg bg-zinc-900/50 border border-zinc-800/50 focus:border-emerald-500/60 focus:outline-none resize-y">${escapeHtml(k.notes)}</textarea>
+            <div class="flex items-center gap-2">
+              <button onclick="openPersonalNote('${k.id}')" class="text-[10px] mono text-zinc-500 hover:text-emerald-400 transition-colors">📝 в блокноте</button>
+              <button onclick="syncPersonalNote('${k.id}')" title="Забрать изменения из блокнота" class="px-2 py-1.5 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-emerald-400 text-xs shrink-0">⟳</button>
+            </div>
+          </div>
         </div>` : ''}
       </div>
       
@@ -2678,6 +2686,22 @@ async function openPersonalNote(id) {
   const res = await api('/api/open_note', { id });
   if (res.ok) showToast('📝 Заметка открыта в блокноте');
   else showToast(`❌ ${res.msg || 'Не удалось открыть заметку'}`);
+}
+
+let PERSONAL_NOTE_DRAFTS = {};
+
+function personalNoteInput(id, val) {
+  PERSONAL_NOTE_DRAFTS[id] = val;
+}
+
+async function personalNoteSave(id) {
+  const k = PERSONAL.find(x => x.id === id);
+  if (!k) { showToast('❌ Личный ключ не найден'); return; }
+  const notes = PERSONAL_NOTE_DRAFTS[id] != null ? PERSONAL_NOTE_DRAFTS[id] : (k.notes || '');
+  PERSONAL_NOTE_DRAFTS[id] = null;
+  const res = await api('/api/save_personal', { id: id, provider: k.provider || '', value: k.value || '', notes: notes || '' });
+  if (res.ok) { k.notes = notes || ''; renderCurrentView(); showToast('📝 Заметка сохранена'); }
+  else { showToast('❌ ' + (res.msg || 'Ошибка')); }
 }
 
 async function syncPersonalNote(id) {
